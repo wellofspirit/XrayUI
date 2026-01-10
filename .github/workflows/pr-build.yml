@@ -66,8 +66,8 @@ jobs:
             -scheme "${XCODE_SCHEME}" \
             -configuration "${XCODE_CONFIGURATION}" \
             -derivedDataPath "${DERIVED_DATA_PATH}" \
-            -arch arm64 -arch x86_64 \
             -destination 'platform=macOS' \
+            ARCHS="arm64 x86_64" \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -77,8 +77,8 @@ jobs:
             -scheme "${XCODE_SCHEME}" \
             -configuration "${XCODE_CONFIGURATION}" \
             -derivedDataPath "${DERIVED_DATA_PATH}" \
-            -arch arm64 -arch x86_64 \
             -destination 'platform=macOS' \
+            ARCHS="arm64 x86_64" \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
