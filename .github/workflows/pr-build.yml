@@ -16,6 +16,9 @@ jobs:
   build:
     name: Build and Upload Test Artifact
     runs-on: macos-14
+    permissions:
+      contents: read
+      pull-requests: write
 
     steps:
       - name: Checkout PR code
