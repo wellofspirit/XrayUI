@@ -1,0 +1,226 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - 'release/**'
+  workflow_dispatch:
+
+env:
+  XCODE_PROJECT: XrayUI.xcodeproj
+  XCODE_SCHEME: XrayUI
+  XCODE_CONFIGURATION: Release
+  APP_NAME: XrayUI
+  DERIVED_DATA_PATH: ./DerivedData
+
+jobs:
+  release:
+    name: Build and Create Release
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.4'
+
+      - name: Auto-detect version and create tag
+        id: version
+        run: |
+          # Extract major.minor from branch name (release/2.1 → 2.1)
+          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          BASE_VERSION=$(echo "$BRANCH_NAME" | sed 's|release/||')
+
+          echo "Branch: $BRANCH_NAME"
+          echo "Base version: $BASE_VERSION"
+
+          # Find all existing tags for this version series
+          LATEST_TAG=$(git tag -l "v${BASE_VERSION}.*" | sort -V | tail -n1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            # No existing tags → first release
+            NEW_VERSION="${BASE_VERSION}.0"
+            echo "No existing tags found. Creating first release: v${NEW_VERSION}"
+          else
+            # Extract patch number and increment
+            echo "Latest tag: $LATEST_TAG"
+            PATCH=$(echo "$LATEST_TAG" | sed "s/v${BASE_VERSION}\.//" )
+            NEXT_PATCH=$((PATCH + 1))
+            NEW_VERSION="${BASE_VERSION}.${NEXT_PATCH}"
+            echo "Incrementing from $LATEST_TAG to v${NEW_VERSION}"
+          fi
+
+          NEW_TAG="v${NEW_VERSION}"
+          echo "version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=${NEW_TAG}" >> $GITHUB_OUTPUT
+          echo "Creating tag: ${NEW_TAG}"
+
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create and push tag
+          git tag "$NEW_TAG"
+          git push origin "$NEW_TAG"
+
+      - name: Validate Xcode project
+        run: |
+          xcodebuild -list -project "${XCODE_PROJECT}"
+
+      - name: Share Xcode scheme (if not shared)
+        run: |
+          mkdir -p "${XCODE_PROJECT}/xcshareddata/xcschemes"
+
+          if [ ! -f "${XCODE_PROJECT}/xcshareddata/xcschemes/${XCODE_SCHEME}.xcscheme" ]; then
+            echo "Scheme not shared. Attempting to share..."
+            USER_SCHEME=$(find "${XCODE_PROJECT}/xcuserdata" -name "${XCODE_SCHEME}.xcscheme" 2>/dev/null | head -n 1)
+            if [ -n "$USER_SCHEME" ]; then
+              cp "$USER_SCHEME" "${XCODE_PROJECT}/xcshareddata/xcschemes/${XCODE_SCHEME}.xcscheme"
+              echo "Scheme shared successfully"
+            else
+              echo "Warning: Scheme not found in user data"
+            fi
+          else
+            echo "Scheme is already shared"
+          fi
+
+      - name: Build macOS app (Universal Binary)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "${XCODE_PROJECT}" \
+            -scheme "${XCODE_SCHEME}" \
+            -configuration "${XCODE_CONFIGURATION}" \
+            -derivedDataPath "${DERIVED_DATA_PATH}" \
+            -arch arm64 -arch x86_64 \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            clean build | xcpretty || xcodebuild \
+            -project "${XCODE_PROJECT}" \
+            -scheme "${XCODE_SCHEME}" \
+            -configuration "${XCODE_CONFIGURATION}" \
+            -derivedDataPath "${DERIVED_DATA_PATH}" \
+            -arch arm64 -arch x86_64 \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            clean build
+
+      - name: Verify build output
+        run: |
+          APP_PATH="${DERIVED_DATA_PATH}/Build/Products/${XCODE_CONFIGURATION}/${APP_NAME}.app"
+
+          echo "Checking for built app..."
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Error: App not found at expected path: $APP_PATH"
+            echo "Directory listing:"
+            find "${DERIVED_DATA_PATH}/Build/Products" -type d -name "*.app"
+            exit 1
+          fi
+
+          echo "App found at: $APP_PATH"
+          echo "App contents:"
+          ls -lh "$APP_PATH/Contents/MacOS/"
+
+          echo "Verifying architectures..."
+          lipo -info "$APP_PATH/Contents/MacOS/${APP_NAME}"
+
+      - name: Package app as ZIP
+        id: package
+        run: |
+          APP_PATH="${DERIVED_DATA_PATH}/Build/Products/${XCODE_CONFIGURATION}/${APP_NAME}.app"
+          VERSION="${{ steps.version.outputs.version }}"
+          ZIP_NAME="${APP_NAME}-${VERSION}-macos.zip"
+
+          mkdir -p ./release
+          cp -R "$APP_PATH" ./release/
+
+          cd ./release
+          ditto -c -k --keepParent "${APP_NAME}.app" "../${ZIP_NAME}"
+          cd ..
+
+          if [ ! -f "$ZIP_NAME" ]; then
+            echo "Error: ZIP file not created"
+            exit 1
+          fi
+
+          SIZE=$(du -h "$ZIP_NAME" | cut -f1)
+          echo "Package created: ${ZIP_NAME} (${SIZE})"
+          echo "zip_name=${ZIP_NAME}" >> $GITHUB_OUTPUT
+          echo "zip_path=./${ZIP_NAME}" >> $GITHUB_OUTPUT
+
+          SHA256=$(shasum -a 256 "$ZIP_NAME" | cut -d ' ' -f1)
+          echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
+          echo "SHA256: ${SHA256}"
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA256="${{ steps.package.outputs.sha256 }}"
+          ZIP_NAME="${{ steps.package.outputs.zip_name }}"
+
+          cat > release_notes.md <<EOF
+          ## XrayUI v${VERSION}
+
+          ### Installation
+
+          1. Download \`${ZIP_NAME}\`
+          2. Unzip the archive
+          3. Move XrayUI.app to your Applications folder
+          4. Right-click and select "Open" on first launch (unsigned app)
+
+          ### System Requirements
+
+          - macOS 13.0 or later
+          - Apple Silicon (arm64) or Intel (x86_64)
+
+          ### Verification
+
+          **SHA256 Checksum:**
+          \`\`\`
+          ${SHA256}
+          \`\`\`
+
+          Verify with:
+          \`\`\`bash
+          shasum -a 256 ${ZIP_NAME}
+          \`\`\`
+
+          ---
+
+          **Note:** This is an unsigned build. You may need to allow it in System Settings > Privacy & Security after first launch.
+          EOF
+
+          echo "Release notes generated"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: XrayUI v${{ steps.version.outputs.version }}
+          body_path: release_notes.md
+          files: ${{ steps.package.outputs.zip_path }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ steps.version.outputs.version }}
+          path: ${{ steps.package.outputs.zip_path }}
+          retention-days: 90
